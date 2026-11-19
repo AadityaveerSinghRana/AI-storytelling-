@@ -38,6 +38,7 @@ a { color: inherit; }
 .top-actions { display: flex; align-items: center; gap: 11px; }
 .demo-pill, .avatar { border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; font-size: 10px; color: #c4c9d8; background: #121522; }
 .demo-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 9px var(--mint); }
+.demo-dot.provider-missing { background: #e89a77; box-shadow: 0 0 9px #e89a77; }
 .avatar { width: 31px; height: 31px; display: grid; place-items: center; padding: 0; font-weight: 700; background: linear-gradient(135deg, #5c7aff, #9b64e9); border: 0; }
 .content { max-width: 1330px; margin: 0 auto; padding: 44px 5.2% 72px; }
 .eyebrow { color: #9bacff; font-size: 10px; text-transform: uppercase; letter-spacing: 2px; font-weight: 700; }
@@ -98,6 +99,7 @@ h3 { font-size: 17px; margin-bottom: 8px; }
 input, select, textarea { width: 100%; color: var(--text); background: #0c0f19; border: 1px solid #ffffff18; border-radius: 11px; padding: 12px 13px; font-size: 12px; }
 select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, #9da6c0 50%), linear-gradient(135deg, #9da6c0 50%, transparent 50%); background-position: calc(100% - 17px) 17px, calc(100% - 12px) 17px; background-size: 5px 5px; background-repeat: no-repeat; }
 textarea { min-height: 74px; resize: vertical; }
+#prompt { min-height: 145px; line-height: 1.65; }
 .idea-panel { background: radial-gradient(ellipse at 100% 0%, #555ce733, transparent 55%), #141826; }
 .idea-mark { width: 40px; height: 40px; border-radius: 13px; display: grid; place-items: center; background: #718bff21; color: #bac6ff; font-size: 19px; margin-bottom: 14px; }
 .idea-panel p { color: var(--muted); font-size: 11px; line-height: 1.7; }
@@ -177,6 +179,8 @@ textarea { min-height: 74px; resize: vertical; }
 .progress-step.done { color: #b9aaff; border-color: #a48aff40; background: #a48aff10; }
 .story-detail-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .notice { border-left: 2px solid #f0bb68; background: #f0bb6810; color: #dfc89f; padding: 10px 12px; border-radius: 0 10px 10px 0; font-size: 10px; line-height: 1.55; }
+.error-notice { border-color: #ef8f84; background: #ef8f8412; color: #ffc1b8; margin: 12px 0; }
+.provider-notice { border: 1px solid #ffffff14; border-radius: 11px; color: #aab1c5; background: #0c0f1988; padding: 11px 12px; margin-top: 15px; font-size: 10px; line-height: 1.6; }
 .hidden { display: none !important; }
 @media (max-width: 980px) {
   .app-shell { grid-template-columns: 72px minmax(0, 1fr); }

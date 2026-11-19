@@ -14,13 +14,31 @@
     busy: false,
     returnView: "home",
     pageStartedAt: Date.now(),
+    providerStatus: { provider: "anthropic", configured: false, model: "" },
+    requestError: "",
     signals: { skips: 0, rereads: 0, favorites: 0 },
   };
 
   function loadStories() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-      return Array.isArray(saved) ? saved : [];
+      return Array.isArray(saved) ? saved.filter((story) => story && typeof story === "object").map((story) => {
+        story.prompt ||= story.seed || story.title || "";
+        story.pages ||= [];
+        story.outline ||= [];
+        story.metrics ||= { favorites: 0, rewrites: 0, skips: 0, rereads: 0 };
+        if (story.bible) {
+          story.bible.genre ||= story.genre || "Literary fiction";
+          story.premise ||= {
+            title: story.title || "Untitled story",
+            pitch: story.seed || story.title || "A story from your library",
+            shape: story.bible.arc || "Character-led story",
+            twist: story.bible.twist || "An earned discovery changes the characters' understanding.",
+            genre: story.genre || "Literary fiction",
+          };
+        }
+        return story;
+      }) : [];
     } catch (error) {
       console.warn("Could not read the local story library.", error);
       return [];
@@ -36,7 +54,7 @@
     }
   }
 
-  const provider = {
+  const legacyDemoProvider = {
     name: "Demo Story Engine",
     propose(input) {
       const seed = input.seed.trim();
@@ -109,6 +127,7 @@
         arc: premise.shape,
         twist: premise.twist,
       };
+
     },
     createOutline(premise) {
       return [
@@ -283,6 +302,71 @@
     },
   };
 
+  const provider = {
+    propose(input) {
+      return apiRequest("/api/premises", input);
+    },
+    createBible(input, premise) {
+      return apiRequest("/api/blueprint", {
+        prompt: input.prompt,
+        reader: input.reader,
+        purpose: input.purpose,
+        premise,
+        sequelCharacters: input.sequelCharacters || [],
+      });
+    },
+    renderPage(story, index, options = {}) {
+      return apiRequest("/api/page", {
+        prompt: story.prompt,
+        reader: story.reader,
+        purpose: story.purpose,
+        premise: story.premise,
+        bible: story.bible,
+        outline: story.outline,
+        index,
+        previousPage: story.pages[index - 1] || null,
+        nextPage: story.pages[index + 1] || story.outline[index + 1] || null,
+        existingPage: options.rewrite ? story.pages[index] : null,
+        rewrite: Boolean(options.rewrite),
+      });
+    },
+    steer(story, prompt, checkpoint) {
+      return apiRequest("/api/steer", {
+        prompt: story.prompt,
+        reader: story.reader,
+        purpose: story.purpose,
+        bible: story.bible,
+        checkpoint,
+        steering: prompt,
+      });
+    },
+  };
+
+  async function apiRequest(path, payload) {
+    const response = await fetch(path, {
+      method: payload ? "POST" : "GET",
+      headers: payload ? { "content-type": "application/json" } : {},
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error("The story server returned an unreadable response.");
+    }
+    if (!response.ok) throw new Error(result.error || `Story generation failed (${response.status}).`);
+    return result;
+  }
+
+  async function loadProviderStatus() {
+    try {
+      state.providerStatus = await apiRequest("/api/status");
+    } catch (error) {
+      state.providerStatus = { provider: "anthropic", configured: false, model: "" };
+      console.error("Could not read story provider status.", error);
+    }
+  }
+
   function escapeHTML(value) {
     return String(value).replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -319,6 +403,11 @@
   }
 
   function layout(content, crumb = "Your studio") {
+    const providerLabel = state.providerStatus.provider === "demo"
+      ? "Demo mode · template output"
+      : state.providerStatus.configured
+        ? `Anthropic · ${escapeHTML(state.providerStatus.model || "ready")}`
+        : "Anthropic · API key required";
     app.innerHTML = `
       <div class="app-shell">
         <aside class="sidebar" aria-label="Main navigation">
@@ -332,7 +421,7 @@
           <div class="sidebar-bottom"><div class="sidebar-note"><strong>Every story has a cut.</strong><p>Follow the film checkpoints to see how each moment changes the story — and the people inside it.</p></div></div>
         </aside>
         <main class="main-area">
-          <header class="topbar"><div class="crumb">${escapeHTML(crumb)}</div><div class="top-actions"><span class="demo-pill"><span class="demo-dot"></span>Provider-ready demo</span><span class="avatar" aria-label="Writer profile">W</span></div></header>
+          <header class="topbar"><div class="crumb">${escapeHTML(crumb)}</div><div class="top-actions"><span class="demo-pill"><span class="demo-dot ${state.providerStatus.configured ? "" : "provider-missing"}"></span>${providerLabel}</span><span class="avatar" aria-label="Writer profile">W</span></div></header>
           <div class="content">${content}</div>
         </main>
       </div>
@@ -363,23 +452,29 @@
   }
 
   function storyCard(story) {
-    return `<article class="story-card"><div class="story-art" aria-hidden="true"></div><div class="story-card-title">${escapeHTML(story.title)}</div><div class="story-card-meta">${escapeHTML(story.genre)} · ${story.pages.length} pages · ${story.outline.length} checkpoints</div><button class="open-story" data-open-story="${escapeHTML(story.id)}" aria-label="Open ${escapeHTML(story.title)}">↗</button></article>`;
+    return `<article class="story-card"><div class="story-art" aria-hidden="true"></div><div class="story-card-title">${escapeHTML(story.title)}</div><div class="story-card-meta">${escapeHTML(story.genre)} · ${story.pages.length}/${story.outline.length} pages · ${story.outline.length} checkpoints</div><button class="open-story" data-open-story="${escapeHTML(story.id)}" aria-label="Open ${escapeHTML(story.title)}">↗</button></article>`;
   }
 
   function renderIntake() {
     state.view = "create";
+    const modeMessage = state.providerStatus.provider === "demo"
+      ? "Demo mode uses simple templates and is not AI-generated. Set STORY_PROVIDER=anthropic and ANTHROPIC_API_KEY on the server for real prompt-aware generation."
+      : state.providerStatus.configured
+        ? "Your request will shape the premises, story bible, character arcs, and every page."
+        : "Generation is currently disabled. Set ANTHROPIC_API_KEY on the server, or explicitly use STORY_PROVIDER=demo for template-only output.";
     layout(`
-      <div class="eyebrow">A little direction goes a long way</div><h1>What kind of story <span class="gradient-text">are we making?</span></h1>
-      <p class="subhead">Three small inputs are all you need. We'll bring back three genuinely different story paths for you to choose from.</p>
+      <div class="eyebrow">Start with your imagination</div><h1>Tell us the story <span class="gradient-text">you want.</span></h1>
+      <p class="subhead">Describe a character, world, moment, or whole plot in your own words. We'll turn it into three distinct story paths before drafting.</p>
       <div class="form-layout" style="margin-top:27px">
         <form class="panel" id="intake-form">
+          <div class="form-field"><label for="prompt">What story would you like to read?</label><textarea id="prompt" name="prompt" minlength="5" maxlength="2000" required placeholder="A lonely lighthouse keeper receives letters from someone living 100 years in the future. I want a hopeful mystery about grief and second chances."></textarea><div class="field-hint">Be as specific or open-ended as you like. Up to 2,000 characters.</div></div>
           <div class="form-field"><label for="reader">Who is this story for?</label><select id="reader" name="reader"><option>General audience</option><option>Young reader (ages 8–12)</option><option>Teen reader</option><option>Myself</option><option>A friend or loved one</option></select><div class="field-hint">We'll tune voice and intensity for the reader.</div></div>
           <div class="form-field"><label for="purpose">What should it do?</label><select id="purpose" name="purpose"><option>Entertainment</option><option>Bedtime wind-down</option><option>Explore a feeling</option><option>Classroom discussion</option><option>A thoughtful gift</option></select></div>
-          <div class="form-field"><label for="genre">What story flavor sounds good?</label><select id="genre" name="genre"><option>Literary mystery</option><option>Magical realism</option><option>Science fiction</option><option>Adventure</option><option>Quiet fantasy</option></select></div>
-          <button class="button button-primary" type="submit">Find my three story paths <span aria-hidden="true">→</span></button>
+          ${state.requestError ? `<div class="notice error-notice" role="alert">${escapeHTML(state.requestError)}</div>` : ""}
+          <button class="button button-primary" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Thinking through your request…" : "Find my three story paths"} <span aria-hidden="true">→</span></button>
         </form>
-        <aside class="panel idea-panel"><div class="idea-mark">✧</div><h3>Not a blank page.</h3><p>We'll shape a premise, an outline, and a story bible before writing any prose. You choose the direction; the characters do the living.</p><div class="notice" style="margin-top:18px">Every story is arranged into film-like checkpoints—even when the timeline loops, braids, or jumps ahead.</div></aside>
-      </div>`, "New story · Story seed");
+        <aside class="panel idea-panel"><div class="idea-mark">✧</div><h3>Not a blank page.</h3><p>We'll shape a premise, an outline, and a story bible before writing any prose. You choose the direction; the characters do the living.</p><div class="notice" style="margin-top:18px">Every story is arranged into five film-like checkpoints—even when the timeline loops, braids, or jumps ahead.</div><div class="provider-notice">${escapeHTML(modeMessage)}</div></aside>
+      </div>`, "New story · Your prompt");
   }
 
   function renderPremises() {
@@ -388,9 +483,10 @@
     const premises = state.draft.premises;
     layout(`
       <div class="eyebrow">Three distinct paths</div><h1>Which story would you <span class="gradient-text">follow?</span></h1>
-      <p class="subhead">Each premise takes the same seed in a different structural direction. Pick one to shape its characters and outline.</p>
-      <div class="premise-grid">${premises.map((premise, index) => `<button class="premise-card ${state.selectedPremise === index ? "selected" : ""}" data-premise="${index}" aria-pressed="${state.selectedPremise === index}"><span class="premise-number">PATH 0${index + 1} · ${escapeHTML(premise.shape)}</span><h3>${escapeHTML(premise.title)}</h3><p>${escapeHTML(premise.pitch)}</p><span class="premise-tag">${escapeHTML(input.genre)}</span></button>`).join("")}</div>
-      <div class="bottom-actions"><button class="button button-secondary" data-action="back-intake">← Edit my choices</button><button class="button button-primary" data-action="choose-premise">Build the story bible →</button></div>`, "New story · Choose a premise");
+      <p class="subhead">Each premise is shaped by your request, but takes a different narrative route. Choose one to build its character agents and five-cut outline.</p>
+      ${state.requestError ? `<div class="notice error-notice" role="alert">${escapeHTML(state.requestError)}</div>` : ""}
+      <div class="premise-grid">${premises.map((premise, index) => `<button class="premise-card ${state.selectedPremise === index ? "selected" : ""}" data-premise="${index}" aria-pressed="${state.selectedPremise === index}" ${state.busy ? "disabled" : ""}><span class="premise-number">PATH 0${index + 1} · ${escapeHTML(premise.shape)}</span><h3>${escapeHTML(premise.title)}</h3><p>${escapeHTML(premise.pitch)}</p><span class="premise-tag">${escapeHTML(premise.genre)}</span></button>`).join("")}</div>
+      <div class="bottom-actions"><button class="button button-secondary" data-action="back-intake">← Edit my request</button><button class="button button-primary" data-action="choose-premise" ${state.busy ? "disabled" : ""}>${state.busy ? "Building story bible…" : "Build the story bible →"}</button></div>`, "New story · Choose a premise");
   }
 
   function renderBlueprint() {
@@ -411,11 +507,12 @@
         <div class="bible-section"><h3>Emotional arc</h3><p>${escapeHTML(story.bible.arc)}: ${escapeHTML(story.bible.twist)}</p></div>
         <div class="bible-section"><h3>Story shape</h3><p>${story.outline.map((item) => `${escapeHTML(item.section)} · ${escapeHTML(item.timing)} — ${escapeHTML(item.beat)}`).join("<br>")}</p></div>
       </div>
-      <div class="bottom-actions"><button class="button button-secondary" data-action="back-premises">← Choose another path</button><button class="button button-primary" data-action="render-story">Render this story <span aria-hidden="true">✦</span></button></div>`, "Story bible · Outline");
+      ${state.requestError ? `<div class="notice error-notice" role="alert">${escapeHTML(state.requestError)}</div>` : ""}
+      <div class="bottom-actions"><button class="button button-secondary" data-action="${story.pages.length ? "back-reader" : "back-premises"}">${story.pages.length ? "← Back to story" : "← Choose another path"}</button>${story.pages.length ? "" : `<button class="button button-primary" data-action="render-story" ${state.busy ? "disabled" : ""}>${state.busy ? "Preparing the first cut…" : "Render this story ✦"}</button>`}</div>`, "Story bible · Outline");
   }
 
   function characterCard(character) {
-    return `<div class="character-card"><div class="character-top"><span class="character-avatar">${escapeHTML(character.name.split(" ").map((part) => part[0]).join(""))}</span><div><div class="character-name">${escapeHTML(character.name)}</div><div class="character-role">${escapeHTML(character.role)}</div></div></div><div class="trait-row">${character.traits.map((trait) => `<span class="trait-chip">${escapeHTML(trait)}</span>`).join("")}</div><p class="state-line"><strong>Wants:</strong> ${escapeHTML(character.goal)}</p><p class="state-line"><strong>Voice:</strong> ${escapeHTML(character.voice)}</p><p class="state-line"><strong>Remembers:</strong> ${escapeHTML(character.memory)}</p></div>`;
+    return `<div class="character-card"><div class="character-top"><span class="character-avatar">${escapeHTML(character.name.split(" ").map((part) => part[0]).join(""))}</span><div><div class="character-name">${escapeHTML(character.name)}</div><div class="character-role">${escapeHTML(character.role)}</div></div></div><div class="trait-row">${character.traits.map((trait) => `<span class="trait-chip">${escapeHTML(trait)}</span>`).join("")}</div><p class="state-line"><strong>Wants:</strong> ${escapeHTML(character.goal)}</p><p class="state-line"><strong>Voice:</strong> ${escapeHTML(character.voice)}</p><p class="state-line"><strong>Relationships:</strong> ${escapeHTML(character.relationships)}</p><p class="state-line"><strong>Remembers:</strong> ${escapeHTML(character.memory)}</p></div>`;
   }
 
   function checkpointRow(checkpoint, index) {
@@ -427,37 +524,64 @@
     state.busy = true;
     state.view = "rendering";
     const story = state.draft.story;
-    state.stories.unshift(story);
     state.activeStoryId = story.id;
-    state.returnView = "home";
-    renderProgress(0);
-    for (let index = 0; index < story.outline.length; index += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 420));
-      provider.evolve(story, index);
-      story.outline[index].status = "rendered";
-      const previousPage = story.pages[index - 1] || null;
-      story.pages[index] = provider.renderPage(story.bible, story.outline[index], state.draft.premise, index, previousPage);
-      story.pages[index].consistency = runContinuityCheck(story, story.pages[index]);
-      story.renderedCheckpoints = index + 1;
+    renderProgress(0, story);
+    try {
+      await generateStoryPage(story, 0);
+      if (!state.stories.some((item) => item.id === story.id)) state.stories.unshift(story);
+      story.renderedCheckpoints = 1;
+      state.requestError = "";
       persist();
-      renderProgress(index + 1);
+      state.busy = false;
+      state.pageIndex = 0;
+      state.view = "reader";
+      state.pageStartedAt = Date.now();
+      state.draft = null;
+      renderReader();
+    } catch (error) {
+      state.busy = false;
+      state.requestError = error.message;
+      state.view = "blueprint";
+      renderBlueprint();
     }
-    state.busy = false;
-    state.pageIndex = 0;
-    state.view = "reader";
-    state.pageStartedAt = Date.now();
-    persist();
-    renderReader();
   }
 
-  function renderProgress(done) {
-    const story = activeStory() || state.draft.story;
+  async function generateStoryPage(story, index, options = {}) {
+    const result = await provider.renderPage(story, index, options);
+    if (!options.rewrite) {
+      const checkpoint = story.outline[index];
+      result.characterUpdates.forEach((update, characterIndex) => {
+        const character = story.bible.characters[characterIndex];
+        Object.assign(character, update);
+        character.stateHistory ||= [];
+        character.stateHistory.push({ checkpointId: checkpoint.id, ...update });
+      });
+    }
+    story.pages[index] = {
+      id: `page-${index + 1}`,
+      checkpointId: story.outline[index].id,
+      title: story.outline[index].label,
+      content: result.content,
+      status: "ready",
+      consistency: [],
+      favorite: story.pages[index]?.favorite || false,
+    };
+    story.pages[index].consistency = [
+      ...(result.consistencyNotes || []),
+      ...runContinuityCheck(story, story.pages[index]),
+    ];
+    story.outline[index].status = "rendered";
+    story.renderedCheckpoints = Math.max(story.renderedCheckpoints || 0, index + 1);
+    persist();
+  }
+
+  function renderProgress(done, story = activeStory() || state.draft.story) {
     const total = story.outline.length;
     layout(`
       <div class="render-layout">
         <section class="panel render-stage" aria-live="polite">
           <div class="eyebrow">Story rendering · ${done} of ${total} film cuts</div><h1>Finding the <span class="gradient-text">right frame.</span></h1>
-          <p class="subhead">Writing each page against the story bible and its neighbors. The story is building in sequence; the timeline itself doesn't have to be.</p>
+          <p class="subhead">${state.providerStatus.provider === "demo" ? "This is a clearly labeled template preview." : "Writing this page against the story bible, character state, and surrounding checkpoint. The story is building in sequence; the timeline itself doesn't have to be."}</p>
           <div class="render-progress" role="progressbar" aria-valuenow="${done}" aria-valuemin="0" aria-valuemax="${total}"><span style="width:${Math.round(done / total * 100)}%"></span></div>
           <div class="render-log">${story.outline.map((checkpoint, index) => `<div class="render-step ${index < done ? "complete" : index === done ? "active" : ""}"><span class="render-check">${index < done ? "✓" : index === done ? "◌" : "·"}</span><span>Cut ${checkpoint.section} · ${escapeHTML(checkpoint.label)}</span>${index === done ? `<span class="branch-mark">near ${escapeHTML(checkpoint.timing.toLowerCase())}</span>` : ""}</div>`).join("")}</div>
         </section>
@@ -486,7 +610,7 @@
     state.view = "reader";
     const page = story.pages[state.pageIndex];
     const checkpoint = story.outline.find((item) => item.id === page.checkpointId);
-    const continuity = runContinuityCheck(story, page);
+    const continuity = page.consistency?.length ? page.consistency : runContinuityCheck(story, page);
     const elapsed = Math.max(0, Math.round((Date.now() - state.pageStartedAt) / 1000));
     layout(`
       <div class="reader-header"><div><div class="eyebrow">${escapeHTML(story.genre)} · ${escapeHTML(story.reader)}</div><h2 style="margin:5px 0">${escapeHTML(story.title)}</h2><div class="reader-meta">${escapeHTML(story.purpose)} · ${story.outline.length} cinematic checkpoints</div></div><div class="reader-controls"><button class="button button-secondary button-small" data-action="read-aloud" aria-label="Read this page aloud">◖ Read aloud</button><button class="button button-secondary button-small" data-action="export">⇩ Export</button></div></div>
@@ -495,13 +619,14 @@
         <div class="film-checkpoint"><div class="checkpoint-label">▣ &nbsp; Film checkpoint ${checkpoint.checkpoint} of ${story.outline.length} <span class="branch-mark">· ${escapeHTML(checkpoint.timing)} in the timeline</span></div><div class="checkpoint-name">${escapeHTML(checkpoint.label)}</div><div class="checkpoint-note">${escapeHTML(checkpoint.branch)} · ${escapeHTML(checkpoint.beat)}</div></div>
         ${continuity.length ? `<div class="notice">Continuity note: ${continuity.map(escapeHTML).join(" ")}</div>` : ""}
         <article class="page-copy" aria-label="Story page ${state.pageIndex + 1}">${page.content.map((paragraph) => `<p>${escapeHTML(paragraph)}</p>`).join("")}</article>
-        <div class="page-footer"><span class="page-number">PAGE ${String(state.pageIndex + 1).padStart(2, "0")} / ${String(story.pages.length).padStart(2, "0")} · ${elapsed}s on this page</span><div class="page-arrows"><button class="button button-secondary button-small" data-action="regenerate">↻ Rewrite page</button><button class="button button-secondary button-small" data-action="favorite">${page.favorite ? "★ Saved" : "☆ Save page"}</button></div></div>
+        <div class="page-footer"><span class="page-number">PAGE ${String(state.pageIndex + 1).padStart(2, "0")} / ${String(story.outline.length).padStart(2, "0")} · ${elapsed}s on this page</span><div class="page-arrows"><button class="button button-secondary button-small" data-action="regenerate" ${state.busy ? "disabled" : ""}>↻ Rewrite page</button><button class="button button-secondary button-small" data-action="favorite">${page.favorite ? "★ Saved" : "☆ Save page"}</button></div></div>
+        ${state.requestError ? `<div class="notice error-notice" role="alert">${escapeHTML(state.requestError)}</div>` : ""}
         ${state.steerOpen ? `<div class="steer-box"><label for="steer-input">A small note for the characters</label><textarea id="steer-input" maxlength="160" placeholder="What should they notice, risk, or remember next?"></textarea><div class="steer-actions"><button class="button button-primary button-small" data-action="steer">Apply at this checkpoint</button></div></div>` : ""}
         <div class="page-context"><strong>Optional steering:</strong> add a thought near a checkpoint to let it shape character memory and the next cut. You can also just keep reading.</div>
-        <div class="page-footer"><div class="engagement"><span class="feedback-pulse"></span>Quietly tracking reading rhythm · ${state.signals.skips} skips · ${state.signals.rereads} rereads</div><div class="page-arrows"><button class="button button-quiet button-small" data-action="steer-toggle">${state.steerOpen ? "Close steering" : "Steer story"}</button><button class="button button-primary button-small" data-action="next-page" ${state.pageIndex === story.pages.length - 1 ? "disabled" : ""}>Next page →</button></div></div>
+        <div class="page-footer"><div class="engagement"><span class="feedback-pulse"></span>Quietly tracking reading rhythm · ${state.signals.skips} skips · ${state.signals.rereads} rereads</div><div class="page-arrows"><button class="button button-quiet button-small" data-action="steer-toggle">${state.steerOpen ? "Close steering" : "Steer story"}</button><button class="button button-primary button-small" data-action="next-page" ${state.pageIndex === story.outline.length - 1 || state.busy ? "disabled" : ""}>${state.busy ? "Writing next page…" : "Next page →"}</button></div></div>
       </div>
       <aside class="reader-side" style="margin-top:24px">
-        <div class="panel"><div class="eyebrow">The living story bible</div><h3 style="margin-top:9px">Character state</h3>${story.bible.characters.map((person) => { const agentState = person.stateHistory?.find((entry) => entry.checkpointId === checkpoint.id) || person; return `<section class="character-state"><div class="character-name">${escapeHTML(person.name)} <span class="status-chip">evolving</span></div><p class="state-line"><strong>Wants:</strong> ${escapeHTML(agentState.goal)}</p><p class="state-line"><strong>Shift:</strong> ${escapeHTML(agentState.change)}</p><p class="state-line"><strong>Voice:</strong> ${escapeHTML(person.voice)}</p><div class="memory-callout"><strong>Memory:</strong> ${escapeHTML(agentState.memory)}</div></section>`; }).join("")}</div>
+        <div class="panel"><div class="eyebrow">The living story bible</div><h3 style="margin-top:9px">Character state</h3>${story.bible.characters.map((person) => { const agentState = [...(person.stateHistory || [])].reverse().find((entry) => entry.checkpointId === checkpoint.id) || person; return `<section class="character-state"><div class="character-name">${escapeHTML(person.name)} <span class="status-chip">evolving</span></div><p class="state-line"><strong>Wants:</strong> ${escapeHTML(agentState.goal)}</p><p class="state-line"><strong>Shift:</strong> ${escapeHTML(agentState.change)}</p><p class="state-line"><strong>Relationships:</strong> ${escapeHTML(agentState.relationships)}</p><p class="state-line"><strong>Voice:</strong> ${escapeHTML(person.voice)}</p><div class="memory-callout"><strong>Memory:</strong> ${escapeHTML(agentState.memory)}</div></section>`; }).join("")}</div>
         <div class="panel"><div class="eyebrow">Story facts</div><div class="character-state" style="margin-top:11px"><p class="state-line">${story.bible.facts.map((fact) => `· ${escapeHTML(fact)}`).join("<br><br>")}</p><p class="state-line"><strong>Consistency scan:</strong> ${continuity.length ? `${continuity.length} note(s) to review` : "No known contradictions"}</p><div class="story-detail-actions"><button class="button button-secondary button-small" data-action="view-bible">Open full bible</button><button class="button button-secondary button-small" data-action="sequel">Start a sequel</button></div></div></div>
       </aside>`, `${story.title} · Read`);
   }
@@ -528,48 +653,86 @@
     renderIntake();
   }
 
-  function preparePremises(form) {
+  async function preparePremises(form) {
     const input = {
+      prompt: form.get("prompt"),
       reader: form.get("reader"),
       purpose: form.get("purpose"),
-      seed: "a forgotten signal",
-      genre: form.get("genre"),
     };
-    state.draft = { input, premises: provider.propose(input) };
-    state.selectedPremise = 0;
-    renderPremises();
+    state.busy = true;
+    state.requestError = "";
+    renderIntake();
+    try {
+      const result = await provider.propose(input);
+      state.draft = { input, premises: result.premises };
+      state.selectedPremise = 0;
+      state.busy = false;
+      renderPremises();
+    } catch (error) {
+      state.busy = false;
+      state.requestError = error.message;
+      renderIntake();
+    }
   }
 
-  function selectPremise(index) {
+  async function selectPremise(index) {
+    if (!state.draft || state.busy) return;
     const premise = state.draft.premises[index];
+    if (!premise) return;
     state.selectedPremise = index;
     const input = { ...state.draft.input };
-    const bible = provider.createBible(input, premise);
-    const outline = provider.createOutline(premise);
-    const story = {
-      id: uid(),
-      title: premise.title,
-      genre: input.genre,
-      reader: input.reader,
-      purpose: input.purpose,
-      seed: input.seed,
-      createdAt: new Date().toISOString(),
-      sequelOf: input.sequelFrom?.id || null,
-      bible,
-      outline,
-      pages: [],
-      storiesRead: 0,
-      metrics: { favorites: 0, rewrites: 0, skips: 0, rereads: 0 },
-    };
-    state.draft.story = story;
-    state.draft.premise = premise;
-    renderBlueprint();
+    state.busy = true;
+    state.requestError = "";
+    renderPremises();
+    try {
+      const { bible, outline } = await provider.createBible(input, premise);
+      const story = {
+        id: uid(),
+        title: premise.title,
+        genre: bible.genre || premise.genre,
+        reader: input.reader,
+        purpose: input.purpose,
+        prompt: input.prompt,
+        sequelCharacters: input.sequelCharacters || [],
+        createdAt: new Date().toISOString(),
+        sequelOf: input.sequelOf || null,
+        premise,
+        bible,
+        outline,
+        pages: [],
+        storiesRead: 0,
+        metrics: { favorites: 0, rewrites: 0, skips: 0, rereads: 0 },
+      };
+      state.draft.story = story;
+      state.draft.premise = premise;
+      state.busy = false;
+      renderBlueprint();
+    } catch (error) {
+      state.busy = false;
+      state.requestError = error.message;
+      renderPremises();
+    }
   }
 
-  function trackPageChange(nextIndex) {
+  async function trackPageChange(nextIndex) {
     const story = activeStory();
-    if (!story || nextIndex < 0 || nextIndex >= story.pages.length) return;
+    if (!story || state.busy || nextIndex < 0 || nextIndex >= story.outline.length) return;
     const dwell = Math.max(0, (Date.now() - state.pageStartedAt) / 1000);
+    if (!story.pages[nextIndex]) {
+      state.busy = true;
+      state.requestError = "";
+      renderProgress(story.pages.length, story);
+      try {
+        await generateStoryPage(story, nextIndex);
+      } catch (error) {
+        state.busy = false;
+        state.requestError = error.message;
+        state.view = "reader";
+        renderReader();
+        return;
+      }
+      state.busy = false;
+    }
     if (nextIndex > state.pageIndex) {
       story.storiesRead += 1;
       if (dwell < 2) { state.signals.skips += 1; story.metrics.skips += 1; }
@@ -578,6 +741,7 @@
       story.metrics.rereads += 1;
     }
     state.pageIndex = nextIndex;
+    state.requestError = "";
     state.pageStartedAt = Date.now();
     persist();
     renderReader();
@@ -602,38 +766,55 @@
 
   async function regeneratePage() {
     const story = activeStory();
-    const previousPage = story.pages[state.pageIndex - 1] || null;
-    const nextPage = story.pages[state.pageIndex + 1] || null;
-    const button = document.querySelector('[data-action="regenerate"]');
-    if (button) { button.disabled = true; button.textContent = "Rewriting…"; }
-    await new Promise((resolve) => window.setTimeout(resolve, 250));
-    story.pages[state.pageIndex].content = provider.regeneratePage(state.pageIndex, story, previousPage, nextPage);
-    story.pages[state.pageIndex].consistency = runContinuityCheck(story, story.pages[state.pageIndex]);
-    story.metrics.rewrites += 1;
-    persist();
+    if (!story || state.busy) return;
+    state.busy = true;
+    state.requestError = "";
     renderReader();
-    toast("Rewritten with the story bible and neighboring pages in context.");
+    try {
+      if (!story.pages[state.pageIndex + 1] && state.pageIndex + 1 < story.outline.length) {
+        await generateStoryPage(story, state.pageIndex + 1);
+      }
+      const result = await provider.renderPage(story, state.pageIndex, { rewrite: true });
+      story.pages[state.pageIndex].content = result.content;
+      story.pages[state.pageIndex].consistency = [
+        ...(result.consistencyNotes || []),
+        ...runContinuityCheck(story, story.pages[state.pageIndex]),
+      ];
+      story.metrics.rewrites += 1;
+      persist();
+      toast("Rewritten with the story bible and neighboring pages in context.");
+    } catch (error) {
+      state.requestError = error.message;
+    } finally {
+      state.busy = false;
+      renderReader();
+    }
   }
 
-  function startSequel(sourceStory) {
-    const { input, premise } = provider.createSequel(sourceStory);
-    const bible = provider.createBible(input, premise);
-    const outline = provider.createOutline(premise);
-    const story = {
-      id: uid(),
-      title: premise.title,
-      genre: input.genre,
-      reader: input.reader,
-      purpose: input.purpose,
-      seed: input.seed,
-      createdAt: new Date().toISOString(),
+  async function startSequel(sourceStory) {
+    const characters = sourceStory.bible.characters;
+    const input = {
+      prompt: `Write a sequel to "${sourceStory.title}". Continue these characters and respect their established memories, relationships, and changes. The new story should follow naturally from the previous story. Original story request: ${sourceStory.prompt}`,
+      reader: sourceStory.reader,
+      purpose: sourceStory.purpose,
+      sequelCharacters: characters,
       sequelOf: sourceStory.id,
-      bible, outline, pages: [], storiesRead: 0,
-      metrics: { favorites: 0, rewrites: 0, skips: 0, rereads: 0 },
     };
-    state.draft = { input, premise, story };
-    state.returnView = "library";
-    renderBlueprint();
+    state.busy = true;
+    state.requestError = "";
+    renderLibrary();
+    try {
+      const result = await provider.propose(input);
+      state.draft = { input, premises: result.premises };
+      state.selectedPremise = 0;
+      state.busy = false;
+      renderPremises();
+    } catch (error) {
+      state.busy = false;
+      state.requestError = error.message;
+      renderLibrary();
+      toast(error.message);
+    }
   }
 
   app.addEventListener("click", async (event) => {
@@ -643,8 +824,13 @@
     if (target.dataset.action === "start") { startIntake(); return; }
     if (target.dataset.action === "back-intake") { renderIntake(); return; }
     if (target.dataset.action === "back-premises") { renderPremises(); return; }
-    if (target.dataset.premise !== undefined) { selectPremise(Number(target.dataset.premise)); return; }
-    if (target.dataset.action === "choose-premise") { selectPremise(state.selectedPremise); return; }
+    if (target.dataset.action === "back-reader") { show("reader"); return; }
+    if (target.dataset.premise !== undefined) {
+      state.selectedPremise = Number(target.dataset.premise);
+      renderPremises();
+      return;
+    }
+    if (target.dataset.action === "choose-premise") { await selectPremise(state.selectedPremise); return; }
     if (target.dataset.action === "render-story") { await renderStory(); return; }
     if (target.dataset.openStory) {
       state.activeStoryId = target.dataset.openStory;
@@ -653,7 +839,7 @@
       show("reader");
       return;
     }
-    if (target.dataset.action === "next-page") { trackPageChange(state.pageIndex + 1); return; }
+    if (target.dataset.action === "next-page") { await trackPageChange(state.pageIndex + 1); return; }
     if (target.dataset.action === "read-aloud") { readAloud(); return; }
     if (target.dataset.action === "export") { exportStory(); return; }
     if (target.dataset.action === "regenerate") { await regeneratePage(); return; }
@@ -669,17 +855,34 @@
       const prompt = document.querySelector("#steer-input")?.value.trim();
       if (!prompt) { toast("Add a short note before steering."); return; }
       const story = activeStory();
-      const name = provider.steer(story, prompt);
-      const upcoming = story.pages[state.pageIndex + 1];
-      if (upcoming) upcoming.content[0] = `${upcoming.content[0]} ${name} kept the reader's note in mind.`;
-      state.steerOpen = false;
-      persist(); renderReader(); toast(`${name}'s memory updated for the next checkpoint.`); return;
+      state.busy = true;
+      state.requestError = "";
+      renderReader();
+      try {
+        const checkpoint = story.outline[state.pageIndex];
+        const result = await provider.steer(story, prompt, checkpoint);
+        result.characterUpdates.forEach((update, index) => {
+          const character = story.bible.characters[index];
+          Object.assign(character, update);
+          character.stateHistory ||= [];
+          character.stateHistory.push({ checkpointId: checkpoint.id, ...update });
+        });
+        state.steerOpen = false;
+        persist();
+        toast("Character memories updated for the next checkpoint.");
+      } catch (error) {
+        state.requestError = error.message;
+      } finally {
+        state.busy = false;
+        renderReader();
+      }
+      return;
     }
     if (target.dataset.action === "view-bible") { state.view = "blueprint"; state.draft = { story: activeStory(), premise: { title: activeStory().title, shape: activeStory().bible.arc } }; renderBlueprint(); return; }
-    if (target.dataset.action === "sequel") { startSequel(activeStory()); return; }
+    if (target.dataset.action === "sequel") { await startSequel(activeStory()); return; }
     if (target.dataset.sequel) {
       const story = state.stories.find((item) => item.id === target.dataset.sequel);
-      if (story) startSequel(story);
+      if (story) await startSequel(story);
       return;
     }
   });
@@ -687,7 +890,7 @@
   app.addEventListener("submit", (event) => {
     if (event.target.id !== "intake-form") return;
     event.preventDefault();
-    preparePremises(new FormData(event.target));
+    void preparePremises(new FormData(event.target));
   });
 
   window.addEventListener("beforeunload", () => {
@@ -695,4 +898,7 @@
   });
 
   renderHome();
+  void loadProviderStatus().then(() => {
+    if (state.view === "home") renderHome();
+  });
 })();
