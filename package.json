@@ -1,0 +1,13 @@
+{
+  "name": "fableframe-storytelling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A checkpointed, character-led AI storytelling studio",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
